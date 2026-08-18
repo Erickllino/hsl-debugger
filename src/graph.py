@@ -1,9 +1,9 @@
 """A tela que aparece depois de conectar: nós, tópicos e inspeção.
 
-Decisão do §8 do `docs/T1_DEBUG.md`: **lista**, não grafo desenhado nem painel de
-saúde. Duas tabelas e um inspetor embaixo. O grafo desenhado entra depois, e por
-isso os dados aqui já vêm cruzados por nome completo de nó — desenhar arestas
-depois vira uma leitura desta mesma estrutura.
+Decisão do §8 do `docs/T1_DEBUG.md`: **lista** primeiro, e o grafo desenhado
+como segunda leitura da mesma estrutura de dados — é a aba *Desenho*, em
+`desenho.py`. Nenhum dado novo foi pedido ao agente para ela existir: as arestas
+saem dos mesmos `pubs`/`subs` cruzados por nome completo de nó.
 
 Três coisas neste arquivo não são estilo, são consequência do protocolo:
 
@@ -19,6 +19,8 @@ Três coisas neste arquivo não são estilo, são consequência do protocolo:
 import json
 
 from PySide6 import QtCore, QtGui, QtWidgets
+
+from src.desenho import PainelDesenho
 
 SEM_TIPO = "(tipo desconhecido)"
 
@@ -72,10 +74,21 @@ class GraphPage(QtWidgets.QWidget):
         listas.setStretchFactor(0, 3)
         listas.setStretchFactor(1, 5)
 
+        # Aba, não painel lado a lado: o desenho quer a largura inteira, e a
+        # pergunta "quem fala com quem" não costuma ser feita ao mesmo tempo que
+        # "quais tópicos existem". O inspetor fica embaixo das duas, porque ele
+        # responde à mesma seleção venha ela de onde vier.
+        self.painel_desenho = PainelDesenho()
+        self.desenho = self.painel_desenho.desenho
+
+        self.abas = QtWidgets.QTabWidget()
+        self.abas.addTab(listas, "Listas")
+        self.abas.addTab(self.painel_desenho, "Desenho")
+
         self.inspetor = Inspector()
 
         divisor = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        divisor.addWidget(listas)
+        divisor.addWidget(self.abas)
         divisor.addWidget(self.inspetor)
         divisor.setStretchFactor(0, 3)
         divisor.setStretchFactor(1, 2)
@@ -85,8 +98,19 @@ class GraphPage(QtWidgets.QWidget):
         fora.addWidget(divisor, stretch=1)
 
         self.busca.textChanged.connect(self._aplicar_filtro)
+        self.busca.textChanged.connect(self.desenho.definir_filtro)
         self.tabela_nos.itemSelectionChanged.connect(self._no_selecionado)
         self.tabela_topicos.itemSelectionChanged.connect(self._topico_selecionado)
+
+        # Clicar no desenho é clicar na tabela: a seleção é uma só, e é a tabela
+        # que manda. Assim o caminho que assina tópico continua sendo um único
+        # (`_topico_selecionado`) em vez de dois que precisam concordar.
+        self.desenho.escolheu_no.connect(
+            lambda nome: self._selecionar(self.tabela_nos, nome, avisar=True)
+        )
+        self.desenho.escolheu_topico.connect(
+            lambda nome: self._selecionar(self.tabela_topicos, nome, avisar=True)
+        )
 
     # -- construção -------------------------------------------------------
 
@@ -135,6 +159,7 @@ class GraphPage(QtWidgets.QWidget):
         self._preencher_nos()
         self._preencher_topicos()
         self._aplicar_filtro()
+        self.desenho.atualizar(self._nos, self._topicos)
 
         # Um tópico assinado pode ter sumido do grafo — o publisher morreu. Isso
         # é informação, não erro: o inspetor continua mostrando a última
@@ -234,12 +259,21 @@ class GraphPage(QtWidgets.QWidget):
         item = tabela.item(linhas[0].row(), 0)
         return item.text() if item else None
 
-    def _selecionar(self, tabela, texto):
+    def _selecionar(self, tabela, texto, avisar=False):
+        """Seleciona a linha pelo nome.
+
+        `avisar=False` é o caso de reconstruir a tabela: a seleção é a mesma de
+        antes, e deixar o sinal passar dispararia assinatura de tópico a cada
+        snapshot. `avisar=True` é o clique vindo do desenho, que **precisa**
+        percorrer o mesmo caminho de um clique na tabela.
+        """
         for i in range(tabela.rowCount()):
             item = tabela.item(i, 0)
             if item is not None and item.text() == texto:
-                tabela.blockSignals(True)
+                tabela.blockSignals(not avisar)
+                tabela.setRowHidden(i, False)   # clique no desenho vence o filtro
                 tabela.selectRow(i)
+                tabela.scrollToItem(item)
                 tabela.blockSignals(False)
                 return
 
@@ -247,6 +281,7 @@ class GraphPage(QtWidgets.QWidget):
     def _no_selecionado(self):
         self._no_filtro = self._selecao(self.tabela_nos)
         self._aplicar_filtro()
+        self.desenho.destacar("no", self._no_filtro)
 
     @QtCore.Slot()
     def _limpar_filtro_no(self):
@@ -310,6 +345,11 @@ class GraphPage(QtWidgets.QWidget):
             self.desassinar.emit(self._assinatura)
         self._assinatura = nome
 
+        self.desenho.destacar("topico", nome)
+        # Fio parado até a primeira medida chegar: velocidade só vem de Hz
+        # medido, nunca de chute.
+        self.desenho.fluxo(nome, None)
+
         if nome is None:
             self.inspetor.limpar()
             return
@@ -321,6 +361,10 @@ class GraphPage(QtWidgets.QWidget):
     def receber_msg(self, msg):
         if msg.get("topico") == self._assinatura:
             self.inspetor.nova_msg(msg)
+            # O Hz conta todas as mensagens, não as que sobraram da decimação
+            # (§3) — então a animação anda na taxa real do robô, e não na taxa
+            # que coube no SSH.
+            self.desenho.fluxo(msg["topico"], msg.get("hz"))
 
     def receber_status(self, msg):
         """Erro do agente sobre o tópico aberto (tipo sem overlay, QoS, …)."""
@@ -332,6 +376,7 @@ class GraphPage(QtWidgets.QWidget):
         self._assinatura = None
         self._chave = None
         self.inspetor.limpar()
+        self.desenho.limpar()
 
 
 class Inspector(QtWidgets.QWidget):

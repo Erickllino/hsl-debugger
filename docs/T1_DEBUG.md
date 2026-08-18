@@ -237,14 +237,46 @@ título da janela e no rodapé, sempre.
 
 ---
 
-## 8. O que a janela mostra — decidido: lista
+## 8. O que a janela mostra — lista, e agora o desenho
 
-**Decidido: lista.** Duas tabelas — nós e tópicos — com inspeção do tópico
-selecionado embaixo. O grafo desenhado entra depois, como uma segunda leitura da
-mesma estrutura de dados; por isso o agente já emite nome completo de nó
-(`namespace` + nome) em `nos`, `pubs` e `subs`, que é o que uma aresta precisa.
-O painel de saúde continua sendo o de maior valor, mas ele exige saber o que é o
-"normal" do robô — e isso não se descobre sem robô na mão.
+**Decidido: lista primeiro.** Duas tabelas — nós e tópicos — com inspeção do
+tópico selecionado embaixo. O grafo desenhado entrou depois, como planejado:
+segunda leitura da **mesma** estrutura de dados, numa aba ao lado das tabelas
+(`src/desenho.py`). O agente não ganhou uma linha para isso existir — ele já
+emitia nome completo de nó (`namespace` + nome) em `nos`, `pubs` e `subs`, que é
+o que uma aresta precisa. O painel de saúde continua sendo o de maior valor, mas
+ele exige saber o que é o "normal" do robô — e isso não se descobre sem robô na
+mão.
+
+### Por que não `rqt_graph`
+
+Ele existe, faz exatamente esse desenho e usa graphviz. Não serve aqui porque
+roda **onde o DDS está** — no robô — e a janela só chegaria ao PC por `ssh -X`.
+Três coisas quebram nesse caminho: `rqt` vem no `ros-*-desktop` e robô costuma
+ter `ros-base`; instalar num robô emprestado é o que o §2.2 proíbe; e X11 sobre
+wifi é lento. O próprio container de `demo/` mostra o sintoma barato: tem
+`X11Forwarding yes` e **não** tem `xauth`, então o encaminhamento falha calado.
+Desenhar no PC, a partir do JSON que já chega, não depende de nada disso.
+
+### Decisões do desenho
+
+- **Bipartido** (nó → tópico → nó). Ligar publicador direto no assinante
+  esconderia por qual tópico eles conversam, que é justamente a pergunta.
+- **`/rosout` e `/parameter_events` escondidos por padrão**, com caixinha para
+  mostrar. Todo nó publica nos dois; com eles o desenho vira novelo. As tabelas
+  continuam mostrando tudo — a lista é a verdade completa, o desenho é a leitura
+  legível dela.
+- **Ciclo é o caso normal** (controlador → comando → planta → estado →
+  controlador), então o layout não supõe DAG: a aresta de retorno é detectada,
+  sai do cálculo das camadas e é desenhada tracejada, em arco por baixo.
+- **Acima de 300 caixas o desenho se recusa** e pede um filtro, em vez de
+  entregar borrão e gastar CPU a cada mudança do grafo.
+- **Animação de fluxo só no tópico aberto.** ROS 2 não informa taxa de
+  publicação sem assinar, e assinar tudo para poder animar tudo violaria o §3.
+  Os pontos correm na velocidade do Hz **medido** (escala logarítmica, porque a
+  faixa real vai de 0,1 a 500 Hz), e o Hz conta todas as mensagens, não as que
+  sobraram da decimação. Fio parado quer dizer "não estou medindo isto", nunca
+  "não passa nada aqui".
 
 Registro das três respostas possíveis, que não eram equivalentes:
 
