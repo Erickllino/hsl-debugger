@@ -28,6 +28,11 @@ DEFAULT_PORT = 22
 CONNECT_TIMEOUT = 15
 HELLO_TIMEOUT = 45_000  # ms; inclui achar o ambiente ROS e subir o rclpy.
 
+# O agente se mata depois de 600 s sem receber comando. Olhar um tópico por meia
+# hora sem clicar em nada é uso normal, então a sessão precisa dizer que está
+# viva. É o `ping` do §4, que existia sem cliente até agora.
+KEEPALIVE = 60_000  # ms
+
 # Roda no robô antes do agente. Estratégia em camadas do §5: caminho explícito
 # vence, depois /opt/ros, depois overlays de workspace, e falhar dizendo o que
 # foi procurado. Sem `set -u`: os setup.bash do ROS não sobrevivem a ele.
@@ -141,6 +146,9 @@ class SshSession(QtCore.QObject):
         self._hello_timer.setSingleShot(True)
         self._hello_timer.setInterval(HELLO_TIMEOUT)
         self._hello_timer.timeout.connect(self._on_hello_timeout)
+        self._keepalive = QtCore.QTimer(self)
+        self._keepalive.setInterval(KEEPALIVE)
+        self._keepalive.timeout.connect(lambda: self.send({"cmd": "ping"}))
 
     # -- ciclo de vida ----------------------------------------------------
 
@@ -194,6 +202,7 @@ class SshSession(QtCore.QObject):
     def stop(self):
         """Fecha a sessão. O agente morre com o EOF (§1)."""
         self._hello_timer.stop()
+        self._keepalive.stop()
         if self.proc is not None and self.proc.state() != QtCore.QProcess.NotRunning:
             self.proc.closeWriteChannel()
             if not self.proc.waitForFinished(3000):
@@ -263,6 +272,7 @@ class SshSession(QtCore.QObject):
 
             self._pronto = True
             self._hello_timer.stop()
+            self._keepalive.start()
             self._limpar_askpass()
             self.connected.emit(
                 msg.get("ros_distro", "desconhecido"),
@@ -294,6 +304,7 @@ class SshSession(QtCore.QObject):
         self.stop()
 
     def _on_finished(self, codigo, _status):
+        self._keepalive.stop()
         self._limpar_askpass()
         if self._pronto:
             self.closed.emit()
@@ -307,19 +318,22 @@ class SshSession(QtCore.QObject):
             self.failed.emit(msg)
 
     def _diagnostico(self, codigo):
-        """Traduz saída do ssh em algo que dá para agir."""
-        stderr = "\n".join(self._stderr)
-        baixo = stderr.lower()
+        """Traduz saída do ssh em algo que dá para agir.
+
+        O `stderr` não entra nas mensagens: ele já foi para o painel de
+        diagnóstico ao vivo, e repetir aqui só duplica.
+        """
+        baixo = "\n".join(self._stderr).lower()
 
         if codigo == 3:
             return (
-                f"Nenhum ambiente ROS encontrado em {self._host}.\n{stderr}\n"
-                "Informe o caminho do setup.bash no perfil de conexão."
+                f"Nenhum ambiente ROS encontrado em {self._host}. "
+                "Informe o caminho do setup.bash acima."
             )
         if codigo == 4:
             return f"python3 não existe em {self._host}."
         if codigo == 127:
-            return f"{self._host} não tem `bash` ou `base64` no PATH.\n{stderr}"
+            return f"{self._host} não tem `bash` ou `base64` no PATH."
 
         if "permission denied" in baixo:
             return "Autenticação recusada. Confira usuário e senha."
@@ -335,4 +349,4 @@ class SshSession(QtCore.QObject):
         if "timed out" in baixo or "timeout" in baixo:
             return f"Tempo esgotado conectando em {self._host}:{self._porta}."
 
-        return f"ssh terminou com código {codigo}.\n{stderr}".strip()
+        return f"ssh terminou com código {codigo}."

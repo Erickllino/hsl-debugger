@@ -156,7 +156,29 @@ tópico silenciosamente inútil.
 **Envio do script.** Não é possível mandar o `.py` pelo `stdin` se o `stdin` é o
 canal do protocolo. Duas opções, ambas de poucas linhas: copiar o arquivo numa
 primeira invocação e executar numa segunda, ou embutir o script codificado na
-própria linha de comando. Escolher uma e documentar.
+própria linha de comando.
+
+**Decidido: embutir em base64 na linha de comando.** Uma invocação só, e nada é
+escrito no disco do robô — o que fecha o passo 3 do §1 sem deixar rastro em
+máquina emprestada e sem etapa de limpeza. O `agent.py` atual dá ~9 KB de linha
+de comando, longe do `ARG_MAX` (~2 MB). Se um dia o agente crescer demais, a
+alternativa do `scp` continua válida.
+
+O truque que faz isso funcionar é usar substituição de comando em vez de pipe,
+nos dois níveis:
+
+```sh
+ssh -T usuario@robo 'bash -c "$(printf %s <BOOTSTRAP_B64> | base64 -d)"'
+# e, dentro do bootstrap, depois de carregar o ambiente:
+exec python3 -c "$(printf %s "$agent_b64" | base64 -d)"
+```
+
+Com pipe (`... | bash`), o `stdin` do shell — e por herança o do agente — seria
+o pipe já consumido, e o canal do protocolo morreria antes de existir.
+
+**Transporte no PC: `ssh` do sistema via `QProcess`**, não biblioteca SSH em
+Python. Mantém o §7 (só PySide6 e biblioteca padrão) e herda `~/.ssh/config`,
+`known_hosts` e agente de chaves do usuário de graça.
 
 ---
 
@@ -169,6 +191,15 @@ não pode existir é a caixinha "lembrar senha": basta ela existir para que, em
 poucos meses, haja senha de robô em texto plano no disco de várias pessoas do time
 — inclusive senha de robô que não é do time.
 
+Quando há senha digitada, ela vai ao `ssh` por `SSH_ASKPASS` — um helper `0700`
+temporário que lê a senha de variável de ambiente do processo filho. Nunca por
+`sshpass -p`, que deixaria a senha visível no `ps` para qualquer usuário do PC.
+O campo é limpo assim que a sessão sobe.
+
+Com senha em jogo, `StrictHostKeyChecking=yes` é obrigatório: no modo `ask`, a
+pergunta de host key também passaria pelo askpass e seria respondida com a
+senha. Host desconhecido falha com instrução em vez de perguntar.
+
 Caminho recomendado, oferecido na primeira conexão: gerar par de chaves e copiar a
 pública para o robô. São dois comandos, e depois disso ninguém digita senha nunca mais.
 
@@ -179,6 +210,12 @@ ssh-copy-id usuario@robo
 
 Perfis de conexão salvos guardam host, usuário, porta, caminho do setup e apelido.
 Nunca segredo.
+
+O histórico de endereços vive em `~/.config/t1-debug/hosts.json` — texto simples,
+para ser lido e editado à mão. Cada registro tem `alvo`, `setup` e `ultimo`, e a
+leitura descarta qualquer outra chave: se alguém acrescentar `"senha"` ao arquivo,
+o carregamento joga fora em vez de usar. Só endereço que **conectou** entra, senão
+a lista vira um arquivo dos seus próprios erros de digitação.
 
 ---
 
@@ -200,11 +237,16 @@ título da janela e no rodapé, sempre.
 
 ---
 
-## 8. Questão em aberto
+## 8. O que a janela mostra — decidido: lista
 
-**O que exatamente a janela mostra?** É a decisão mais cara de mudar depois, porque
-determina a estrutura de dados que o agente produz. Três respostas possíveis, não
-equivalentes:
+**Decidido: lista.** Duas tabelas — nós e tópicos — com inspeção do tópico
+selecionado embaixo. O grafo desenhado entra depois, como uma segunda leitura da
+mesma estrutura de dados; por isso o agente já emite nome completo de nó
+(`namespace` + nome) em `nos`, `pubs` e `subs`, que é o que uma aresta precisa.
+O painel de saúde continua sendo o de maior valor, mas ele exige saber o que é o
+"normal" do robô — e isso não se descobre sem robô na mão.
+
+Registro das três respostas possíveis, que não eram equivalentes:
 
 - **Lista** — nós e tópicos em colunas, clique para inspecionar. Simples, cobre 80%
   do uso real, é o que o `rqt` faz mal.
@@ -214,7 +256,11 @@ equivalentes:
   QoS incompatível. Mais opinativo, exige saber o que é o "normal" do robô, e
   provavelmente é o de maior valor real.
 
-Decidir antes de escrever a interface.
+### Ambiente de desenvolvimento
+
+Sem robô na mão, o alvo é o container de `demo/` — `sshd` de verdade, ROS 2
+Humble e nós publicando, com o usuário sem ROS no `.bashrc` para que o §5 seja
+exercitado em vez de contornado. Ver [`demo/README.md`](../demo/README.md).
 
 ---
 
