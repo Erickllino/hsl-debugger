@@ -262,10 +262,12 @@ Desenhar no PC, a partir do JSON que já chega, não depende de nada disso.
 
 - **Bipartido** (nó → tópico → nó). Ligar publicador direto no assinante
   esconderia por qual tópico eles conversam, que é justamente a pergunta.
-- **`/rosout` e `/parameter_events` escondidos por padrão**, com caixinha para
-  mostrar. Todo nó publica nos dois; com eles o desenho vira novelo. As tabelas
-  continuam mostrando tudo — a lista é a verdade completa, o desenho é a leitura
-  legível dela.
+- **O desenho começa mostrando tudo**, e ctrl+clique apaga qualquer caixa;
+  *reorganizar* devolve. `/rosout` e `/parameter_events` são quase sempre os
+  dois primeiros a apagar — todo nó publica neles e o desenho vira novelo — mas
+  escondê-los por padrão seria a ferramenta decidindo por você o que você pode
+  ver, antes de você ter visto. Apagar é maquiagem de tela: não muda a tabela,
+  não muda o grafo, não chega no robô.
 - **Ciclo é o caso normal** (controlador → comando → planta → estado →
   controlador), então o layout não supõe DAG: a aresta de retorno é detectada,
   sai do cálculo das camadas e é desenhada tracejada, em arco por baixo.

@@ -16,9 +16,12 @@ Três decisões deste arquivo que não são estilo:
 
 - o grafo é **bipartido**: nó → tópico → nó. Ligar publicador direto no assinante
   esconderia por qual tópico eles conversam, que é justamente a pergunta;
-- `/rosout` e `/parameter_events` ficam escondidos por padrão. Todo nó fala nos
-  dois, então eles ligam todo mundo em todo mundo e transformam o desenho num
-  novelo onde nada se lê;
+- o desenho começa mostrando **tudo**, e qualquer caixa se apaga com
+  **ctrl+clique** (o botão *reorganizar* devolve). `/rosout` e
+  `/parameter_events` costumam ser os dois primeiros a apagar, porque todo nó
+  publica neles e o desenho vira novelo — mas essa é a sua decisão, tomada
+  vendo o grafo, e não um filtro que a ferramenta aplica antes de te mostrar
+  qualquer coisa;
 - ciclo é normal aqui (controlador → comando → planta → estado → controlador),
   então o layout **não pode supor DAG**. As arestas de retorno são detectadas,
   ignoradas no cálculo das camadas e desenhadas tracejadas.
@@ -34,12 +37,11 @@ import math
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-# Todo nó publica nestes dois, então eles ligam todo mundo em todo mundo e o
-# desenho vira novelo. Começam escondidos — e é só o estado inicial de uma regra
-# geral: qualquer caixa se apaga com ctrl+clique, e *reorganizar* devolve tudo
-# para cá. Sem caixinha de seleção especial para eles: uma regra só, que serve
-# para o `/rosout` e para o nó que você não quer ver agora.
-OCULTOS_PADRAO = frozenset({("topico", "/rosout"), ("topico", "/parameter_events")})
+# Nada começa escondido. O desenho mostra o grafo que o robô tem, e quem decide
+# o que atrapalha é quem está olhando — ctrl+clique apaga, *reorganizar* devolve.
+# `/rosout` e `/parameter_events` costumam ser os dois primeiros a apagar (todo
+# nó publica neles, e por isso ligam todo mundo em todo mundo), mas escondê-los
+# por padrão seria a ferramenta decidindo por você o que você pode ver.
 
 # Acima disso o desenho vira novelo e o layout começa a custar caro a cada
 # mudança do grafo (que chega a 1 Hz). Melhor dizer isso do que entregar borrão.
@@ -442,7 +444,7 @@ class Desenho(QtWidgets.QGraphicsView):
         self._nos = []
         self._topicos = []
         self._termo = ""
-        self._ocultos = set(OCULTOS_PADRAO)
+        self._ocultos = set()
         self._selecao = {"no": None, "topico": None}
         self._caixas = {}
         self._arestas = []
@@ -513,7 +515,7 @@ class Desenho(QtWidgets.QGraphicsView):
         self._selecao = {"no": None, "topico": None}
         self._fluxo = (None, None)
         self._movidos = {}
-        self._ocultos = set(OCULTOS_PADRAO)
+        self._ocultos = set()
         self._enquadrado = False
         self._redesenhar()
 
@@ -541,13 +543,13 @@ class Desenho(QtWidgets.QGraphicsView):
             self.centerOn(retangulo.center())
 
     def reorganizar(self):
-        """Volta ao estado inicial: mostra tudo que você apagou e refaz o layout.
+        """Volta ao começo: mostra tudo de novo e refaz o layout.
 
         Um botão só para as duas maneiras de bagunçar a tela — arrastar caixa e
         apagar caixa — porque quando você quer desfazer, quer desfazer tudo.
         """
         self._movidos = {}
-        self._ocultos = set(OCULTOS_PADRAO)
+        self._ocultos = set()
         self._enquadrado = False
         self._redesenhar()
 
