@@ -31,6 +31,27 @@ def _resumo_tipos(tipos):
     return ", ".join(tipos)
 
 
+def _celula_tipo(topico):
+    """Célula da coluna Tipo: texto e, quando for o caso, o aviso que a pinta.
+
+    São dois problemas diferentes e a distinção importa. *Sem tipo no grafo* é o
+    DDS não ter dito o tipo. *Tipo que não importa* é o tipo estar lá e o
+    ambiente carregado não ter o pacote da mensagem — o caso das mensagens do
+    SDK, que se resolve acrescentando o setup.bash do workspace (§5). O agente
+    responde a segunda em `legivel`; tópico de agente antigo, sem o campo, é
+    tratado como legível.
+    """
+    if not topico["tipos"]:
+        return (SEM_TIPO, "Sem tipo no grafo. Costuma ser overlay do workspace "
+                          "não carregado (§5).")
+    texto = _resumo_tipos(topico["tipos"])
+    if topico.get("legivel", True):
+        return texto
+    return (texto, "O tipo está no grafo, mas o pacote da mensagem não existe no "
+                   "ambiente carregado — não dá para assinar este tópico. "
+                   "Acrescente o setup.bash do workspace no campo Setup ROS (§5).")
+
+
 class GraphPage(QtWidgets.QWidget):
     """Lista o grafo e inspeciona um tópico por vez."""
 
@@ -40,8 +61,10 @@ class GraphPage(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
+        self._bruto = ([], [])       # último snapshot cru, para refiltrar
         self._nos = []
         self._topicos = []
+        self._servicos = []          # nós escondidos pelo filtro de serviço
         self._assinatura = None      # tópico assinado agora, ou None
         self._chave = None           # último snapshot, para detectar mudança
         self._no_filtro = None       # nó escolhido, filtra a tabela de tópicos
@@ -50,11 +73,26 @@ class GraphPage(QtWidgets.QWidget):
         self.busca.setPlaceholderText("filtrar por nome…")
         self.busca.setClearButtonEnabled(True)
 
+        # Nó de serviço entra e sai do grafo a cada chamada, e a lista pisca
+        # junto. Esconder é o padrão porque o que pisca atrapalha ler o que não
+        # pisca — mas é caixa marcável, à vista, e a contagem ao lado sempre diz
+        # quantos estão escondidos, com os nomes no tooltip. Escondido não é
+        # sumido.
+        self.sem_servicos = QtWidgets.QCheckBox("ocultar serviços")
+        self.sem_servicos.setChecked(True)
+        self.sem_servicos.setToolTip(
+            "Esconde os nós que não publicam nem assinam tópico nenhum — fora "
+            "/rosout e /parameter_events, que todo nó tem. Na prática são "
+            "servidores e clientes de serviço; o cliente efêmero nasce a cada "
+            "chamada e some depois, e é ele que faz a lista piscar."
+        )
+
         self.contagem = QtWidgets.QLabel("—")
         self.contagem.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
 
         topo = QtWidgets.QHBoxLayout()
         topo.addWidget(self.busca, stretch=1)
+        topo.addWidget(self.sem_servicos)
         topo.addWidget(self.contagem)
 
         self.tabela_nos = self._tabela(["Nó", "Publica", "Assina"])
@@ -99,6 +137,7 @@ class GraphPage(QtWidgets.QWidget):
 
         self.busca.textChanged.connect(self._aplicar_filtro)
         self.busca.textChanged.connect(self.desenho.definir_filtro)
+        self.sem_servicos.toggled.connect(self._refiltrar)
         self.tabela_nos.itemSelectionChanged.connect(self._no_selecionado)
         self.tabela_topicos.itemSelectionChanged.connect(self._topico_selecionado)
 
@@ -147,6 +186,12 @@ class GraphPage(QtWidgets.QWidget):
 
     def atualizar(self, nos, topicos):
         """Recebe um snapshot do agente. Chamado a ~1 Hz."""
+        self._bruto = (nos, topicos)
+        nos, topicos, self._servicos = self._separar_servicos(nos, topicos)
+
+        # A separação vem antes da chave de propósito: nó de serviço que aparece
+        # e some a cada segundo mudaria a chave toda vez e reconstruiria as duas
+        # tabelas à toa. Filtrar primeiro é o que faz a tela parar de piscar.
         chave = self._resumir(nos, topicos)
         if chave == self._chave:
             # Nada mudou no grafo. Redesenhar aqui só faria a seleção piscar.
@@ -159,6 +204,10 @@ class GraphPage(QtWidgets.QWidget):
         self._preencher_nos()
         self._preencher_topicos()
         self._aplicar_filtro()
+        # O desenho precisa saber quem a lista escondeu: um nó de serviço não
+        # tem tópico próprio, mas publica em /rosout como todo mundo, e a aresta
+        # do /rosout o traria de volta para a tela.
+        self.desenho.definir_servicos(self._servicos)
         self.desenho.atualizar(self._nos, self._topicos)
 
         # Um tópico assinado pode ter sumido do grafo — o publisher morreu. Isso
@@ -167,6 +216,49 @@ class GraphPage(QtWidgets.QWidget):
         if self._assinatura is not None:
             vivos = {t["nome"] for t in self._topicos}
             self.inspetor.marcar_sumido(self._assinatura not in vivos)
+
+    def _separar_servicos(self, nos, topicos):
+        """(nós a mostrar, tópicos sem os nós escondidos, nomes escondidos).
+
+        Quem classifica é o agente, que pergunta ao grafo do robô quantos
+        tópicos próprios cada nó tem (`src/agent.py`, `perfil`). Nó que ele não
+        conseguiu classificar vem sem o campo `topicos` e fica visível: na
+        dúvida, mostrar.
+
+        Os tópicos também são reescritos, e isso não é excesso de zelo. Nó de
+        serviço não tem tópico *próprio*, mas publica em /rosout como qualquer
+        um: deixar o nome dele nos `pubs` faria a contagem de /rosout oscilar a
+        cada aparição e reconstruiria as tabelas do mesmo jeito — o pisca que a
+        caixa existe para tirar.
+        """
+        if not self.sem_servicos.isChecked():
+            return list(nos), list(topicos), []
+
+        visiveis, servicos = [], set()
+        for n in nos:
+            if n.get("agente"):
+                # O nó do próprio agente também não tem tópico, mas escondê-lo
+                # tiraria da tela a prova de que a sessão está viva no robô.
+                visiveis.append(n)
+            elif n.get("topicos") == 0:
+                servicos.add(n.get("completo", n["nome"]))
+            else:
+                visiveis.append(n)
+
+        if servicos:
+            topicos = [
+                dict(t,
+                     pubs=[p for p in t["pubs"] if p not in servicos],
+                     subs=[s for s in t["subs"] if s not in servicos])
+                for t in topicos
+            ]
+        return visiveis, list(topicos), sorted(servicos)
+
+    @QtCore.Slot()
+    def _refiltrar(self):
+        """A caixa mudou: o snapshot é o mesmo, o que a tela mostra não é."""
+        self._chave = None
+        self.atualizar(*self._bruto)
 
     def _resumir(self, nos, topicos):
         """Reduz o snapshot ao que a tela mostra, para comparar dois snapshots.
@@ -206,7 +298,7 @@ class GraphPage(QtWidgets.QWidget):
         for t in self._topicos:
             linhas.append((
                 t["nome"],
-                _resumo_tipos(t["tipos"]),
+                _celula_tipo(t),
                 len(t["pubs"]),
                 len(t["subs"]),
             ))
@@ -223,6 +315,13 @@ class GraphPage(QtWidgets.QWidget):
         tabela.setRowCount(len(linhas))
         for i, linha in enumerate(linhas):
             for j, valor in enumerate(linha):
+                # Uma célula pode vir como (texto, aviso): o aviso pinta e vira
+                # tooltip. É como o tópico que a GUI não consegue ler diz isso na
+                # própria linha, em vez de só quando você clica nele.
+                aviso = None
+                if isinstance(valor, tuple):
+                    valor, aviso = valor
+
                 item = QtWidgets.QTableWidgetItem()
                 if isinstance(valor, int):
                     # Guardar o int como dado faz a ordenação ser numérica; como
@@ -231,12 +330,9 @@ class GraphPage(QtWidgets.QWidget):
                     item.setTextAlignment(QtCore.Qt.AlignCenter)
                 else:
                     item.setText(valor)
-                    if valor == SEM_TIPO:
+                    if aviso:
                         item.setForeground(QtGui.QBrush(QtGui.QColor("#b06000")))
-                        item.setToolTip(
-                            "Sem tipo no grafo. Costuma ser overlay do workspace "
-                            "não carregado (§5)."
-                        )
+                        item.setToolTip(aviso)
                 tabela.setItem(i, j, item)
         tabela.setSortingEnabled(True)
 
@@ -325,10 +421,28 @@ class GraphPage(QtWidgets.QWidget):
                 f"só de <b>{self._no_filtro}</b> — <a href='#'>mostrar todos</a>"
             )
 
-        self.contagem.setText(
-            f"{visiveis_nos}/{len(self._nos)} nós · "
-            f"{visiveis_top}/{len(self._topicos)} tópicos"
-        )
+        partes = [
+            f"{visiveis_nos}/{len(self._nos)} nós",
+            f"{visiveis_top}/{len(self._topicos)} tópicos",
+        ]
+        dica = []
+        if self._servicos:
+            partes.append(f"{len(self._servicos)} serviços ocultos")
+            dica.append("escondidos pela caixa 'ocultar serviços':\n" +
+                        "\n".join(self._servicos))
+
+        # Tipo que está no grafo mas não importa no ambiente carregado é a
+        # resposta à pergunta "meu setup pegou as mensagens do SDK?". Mostrar o
+        # total aqui responde na hora, sem precisar clicar tópico por tópico.
+        sem_overlay = [t["nome"] for t in self._topicos
+                       if t["tipos"] and not t.get("legivel", True)]
+        if sem_overlay:
+            partes.append(f"{len(sem_overlay)} sem tipo carregado")
+            dica.append("tipo no grafo mas não importável — falta o setup.bash "
+                        "do workspace:\n" + "\n".join(sem_overlay))
+
+        self.contagem.setText(" · ".join(partes))
+        self.contagem.setToolTip("\n\n".join(dica))
 
     # -- inspeção ---------------------------------------------------------
 
@@ -375,6 +489,8 @@ class GraphPage(QtWidgets.QWidget):
         """Sessão caindo: nada a desassinar, o agente morre junto."""
         self._assinatura = None
         self._chave = None
+        self._bruto = ([], [])
+        self._servicos = []
         self.inspetor.limpar()
         self.desenho.limpar()
 

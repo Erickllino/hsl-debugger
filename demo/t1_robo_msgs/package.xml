@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>t1_robo_msgs</name>
+  <version>0.1.0</version>
+  <!-- Gêmeo do t1_demo_msgs, com uma diferença que é o ponto: este workspace
+       mora em ~/robo_ws, que é onde o bootstrap procura overlay sozinho. Um
+       pacote em cada lugar é o que permite ver, na mesma tela, qual camada do
+       §5 carregou e qual não. -->
+  <description>Mensagem custom em workspace que o bootstrap acha sozinho (§5, camada 3).</description>
+  <maintainer email="robocin@example.org">RoboCIn</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+  <depend>std_msgs</depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+</package>

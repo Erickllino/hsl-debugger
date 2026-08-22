@@ -444,7 +444,8 @@ class Desenho(QtWidgets.QGraphicsView):
         self._nos = []
         self._topicos = []
         self._termo = ""
-        self._ocultos = set()
+        self._ocultos = set()       # apagados a ctrl+clique, escolha sua
+        self._servicos = set()      # escondidos pelo filtro de serviço da lista
         self._selecao = {"no": None, "topico": None}
         self._caixas = {}
         self._arestas = []
@@ -470,6 +471,18 @@ class Desenho(QtWidgets.QGraphicsView):
         self._nos = nos
         self._topicos = topicos
         self._redesenhar()
+
+    def definir_servicos(self, nomes):
+        """Nós que a lista está escondendo por serem de serviço.
+
+        Conjunto separado do `_ocultos` de propósito: aquele é o que **você**
+        apagou a ctrl+clique e o contador do rodapé conta, este é a mesma
+        decisão da caixa "ocultar serviços" lá em cima. Misturar os dois faria o
+        contador de apagados mentir.
+
+        Não redesenha: quem chama já vem com um `atualizar` logo atrás.
+        """
+        self._servicos = {("no", n) for n in nomes}
 
     def definir_filtro(self, termo):
         if termo == self._termo:
@@ -516,6 +529,7 @@ class Desenho(QtWidgets.QGraphicsView):
         self._fluxo = (None, None)
         self._movidos = {}
         self._ocultos = set()
+        self._servicos = set()
         self._enquadrado = False
         self._redesenhar()
 
@@ -550,6 +564,7 @@ class Desenho(QtWidgets.QGraphicsView):
         """
         self._movidos = {}
         self._ocultos = set()
+        self._servicos = set()
         self._enquadrado = False
         self._redesenhar()
 
@@ -566,7 +581,9 @@ class Desenho(QtWidgets.QGraphicsView):
         self._caixas = {}
         self._arestas = []
 
-        vertices, arestas = montar(self._nos, self._topicos, self._termo, self._ocultos)
+        vertices, arestas = montar(
+            self._nos, self._topicos, self._termo, self._ocultos | self._servicos
+        )
         self._anunciar_ocultos()
 
         if not vertices:

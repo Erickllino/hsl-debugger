@@ -36,10 +36,22 @@ AVISO
 fi
 
 cat <<PROXIMO
-[demo] Na GUI:  SSH = robo@127.0.0.1:$PORTA   Senha = robo   Setup ROS = (vazio)
+[demo] Na GUI:  SSH = robo@127.0.0.1:$PORTA   Senha = robo
 
-       O campo de setup fica vazio de propósito: assim o bootstrap tem que achar
-       /opt/ros/humble/setup.bash sozinho, que é a camada 2 do §5.
+[demo] O container publica /sensor com uma mensagem custom (t1_robo_msgs/msg/Sensor)
+       que não existe em /opt/ros. O setup.bash dela é gerado pelo colcon no
+       \`docker build\` e mora SÓ dentro do container:
+
+           /hsl-player/install/setup.bash
+
+       (por isso não há setup.bash nenhum em demo/ — conferir com
+        \`docker exec $NOME ls /hsl-player/install\`)
+
+       A GUI já abre com esse caminho preenchido, então /sensor sai legível de
+       primeira. Para ver o caso do robô emprestado, APAGUE o campo:
+           o bootstrap só acha /opt/ros/humble, /sensor fica com o tipo pintado
+           de laranja e a contagem diz "1 sem tipo carregado". Daí dá para
+           resolver pelo botão "+ setup ROS" do rodapé, já conectado.
 
 [demo] Logs do robô falso:  docker logs -f $NOME
 [demo] Derrubar:            docker rm -f $NOME

@@ -13,7 +13,51 @@ Depois, na GUI:
 |---|---|
 | SSH | `robo@127.0.0.1:2222` |
 | Senha | `robo` |
-| Setup ROS | *(vazio)* |
+| Setup ROS | depende do que você quer testar — ver abaixo |
+
+## Onde mora cada arquivo
+
+Vale dizer explicitamente, porque a pergunta aparece: **não existe `setup.bash`
+no repositório.** Ele é gerado pelo `colcon` durante o `docker build` e só passa
+a existir dentro da imagem.
+
+| No repositório | Vira, dentro do container |
+|---|---|
+| `demo/Dockerfile` | a receita da imagem |
+| `demo/t1_robo_msgs/` (o `.msg` e o `package.xml`) | `/hsl-player/src/`, e o build produz **`/hsl-player/install/setup.bash`** |
+| `demo/demo-nodes.sh` | `/usr/local/bin/demo-nodes.sh`, o que publica os tópicos |
+| `demo/entrypoint.sh` | `/usr/local/bin/entrypoint.sh`, o PID 1 |
+
+Para olhar de fora:
+
+```bash
+docker exec t1-demo ls /hsl-player/install     # o setup.bash está aqui
+docker exec -it t1-demo bash                    # entrar e fuçar
+```
+
+## Testando o campo *Setup ROS*
+
+O tópico `/sensor` usa `t1_robo_msgs/msg/Sensor`, que não existe em `/opt/ros`.
+O workspace dela fica em `/hsl-player` de propósito: o bootstrap varre
+`~/*_ws` sozinho (§5, camada 3) e **não** varre `/opt`, então informar o caminho
+é a única forma de carregar a mensagem. É o ensaio do problema das mensagens do
+SDK do Booster — tipo presente no grafo, pacote ausente no ambiente.
+
+O caminho é o mesmo do robô de verdade, e a GUI já abre com ele preenchido
+(`SETUP_PADRAO`, em `src/connection.py`). Então o caso normal e o caso quebrado
+são estes:
+
+**Como o campo já vem** (`/hsl-player/install/setup.bash`) — `/sensor` legível e
+assinável. Só essa linha basta: um `install/setup.bash` de colcon carrega o
+underlay `/opt/ros/humble` junto, que é por que a camada 2 não precisa entrar.
+
+**Apagando o campo** — o bootstrap vasculha e só acha `/opt/ros/humble`.
+`/sensor` aparece com o tipo pintado de laranja, o inspetor recusa a assinatura
+explicando que falta o overlay, e a contagem do topo diz `1 sem tipo carregado`.
+
+É o segundo caso que vale rodar, porque é o do robô emprestado: você conecta sem
+saber o caminho, vê o tópico laranja, e resolve pelo botão **+ setup ROS** do
+rodapé sem precisar deslogar.
 
 ## Por que não usar só o `ssh` falso do Passo 8
 
@@ -60,11 +104,21 @@ ssh-copy-id -p 2222 robo@127.0.0.1
 
 ## O grafo atual
 
-Mínimo de propósito: `talker` e `listener` trocando `/chatter`.
+| O que roda | Para exercitar o quê |
+|---|---|
+| `talker` + `listener` em `/chatter` | o caso normal |
+| `ros2 topic pub` em `/sensor` | mensagem custom, que só importa com `/hsl-player` informado no campo |
+| `add_two_ints_server` | nó de serviço estável — sem tópico próprio, escondido pela caixa *ocultar serviços* |
+| `parameter_blackboard` num laço de 4 s | nó de serviço que **pisca**: é ele que fazia a lista de nós se reconstruir a cada segundo |
 
-O grafo rico — `/joint_states`, IMU em `BEST_EFFORT`, um tópico pesado para
-testar truncagem e um nó que morre sozinho para ver o grafo encolher — entra
-depois, em `demo-nodes.sh`, quando a lista de nós e tópicos estiver de pé.
+O `parameter_blackboard` vive 4 s e não meio segundo de propósito. O snapshot vai
+a 1 Hz e a descoberta do DDS leva o tempo dela, então nó que vive menos de um
+segundo — um `ros2 service call`, por exemplo — simplesmente nunca chega a ser
+visto. O que incomoda na tela é o que dura o suficiente para ser desenhado e não
+o suficiente para ficar.
+
+Ainda falta o grafo pesado: `/joint_states`, IMU em `BEST_EFFORT` e um tópico
+grande para testar truncagem.
 
 ## Comandos
 

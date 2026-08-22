@@ -43,6 +43,19 @@ MAX_ITENS = 128
 MAX_BYTES = 32
 MAX_TEXTO = 512
 
+# O que todo nó ROS 2 ganha de graça e não diz nada sobre o que ele faz. Sem
+# descontar isso, todo nó teria tópico e serviço, e a GUI não teria como separar
+# quem só existe para servir/chamar serviço de quem move o robô.
+TOPICOS_PADRAO = frozenset(("/rosout", "/parameter_events"))
+SERVICOS_PADRAO = frozenset((
+    "describe_parameters",
+    "get_parameter_types",
+    "get_parameters",
+    "list_parameters",
+    "set_parameters",
+    "set_parameters_atomically",
+))
+
 _stdout_lock = threading.Lock()
 
 
@@ -71,12 +84,80 @@ def nome_completo(nome, ns):
     return f"{ns.rstrip('/')}/{nome}"
 
 
+def _proprios(nomes_e_tipos):
+    """Tira da lista os serviços de parâmetro que o rclpy cria sozinho."""
+    return [
+        nome for nome, _ in nomes_e_tipos
+        if nome.rsplit("/", 1)[-1] not in SERVICOS_PADRAO
+    ]
+
+
+def perfil(node, nome, ns):
+    """Quantos tópicos e serviços *próprios* o nó tem.
+
+    É o que permite à GUI separar nó de serviço de nó de verdade. Um cliente de
+    serviço efêmero — o nó que nasce para uma chamada e morre depois — não tem
+    tópico nenhum, e é ele que entra e sai do grafo a cada segundo fazendo a
+    lista piscar.
+
+    Devolve `{}` quando o nó sumiu entre a listagem e a consulta: sem
+    classificação, a GUI mostra. Na dúvida, mostrar — esconder o que não
+    conseguimos explicar seria a ferramenta decidindo o que pode ser visto.
+    """
+    try:
+        pubs = node.get_publisher_names_and_types_by_node(nome, ns)
+        subs = node.get_subscriber_names_and_types_by_node(nome, ns)
+        servicos = node.get_service_names_and_types_by_node(nome, ns)
+        clientes = node.get_client_names_and_types_by_node(nome, ns)
+    except Exception as exc:
+        log(f"perfil de {nome_completo(nome, ns)} indisponível: {exc}")
+        return {}
+
+    topicos = {n for n, _ in pubs} | {n for n, _ in subs}
+    return {
+        "topicos": len(topicos - TOPICOS_PADRAO),
+        "servicos": len(_proprios(servicos)),
+        "clientes": len(_proprios(clientes)),
+    }
+
+
+_TIPOS_LEGIVEIS = {}
+
+
+def legivel(nome_tipo):
+    """O tipo está no grafo — mas dá para carregar a classe dele aqui?
+
+    Essa é a diferença entre "o tópico existe" e "eu consigo ler o tópico", e é
+    exatamente o que o overlay do workspace decide (§5). Testar no snapshot faz
+    a GUI mostrar a resposta na lista inteira de uma vez, em vez de o usuário
+    descobrir tópico por tópico, ao clicar.
+
+    O ambiente não muda durante a sessão, então cada tipo é testado uma vez só.
+    """
+    if nome_tipo not in _TIPOS_LEGIVEIS:
+        try:
+            carregar_tipo(nome_tipo)
+            _TIPOS_LEGIVEIS[nome_tipo] = True
+        except Exception:
+            _TIPOS_LEGIVEIS[nome_tipo] = False
+    return _TIPOS_LEGIVEIS[nome_tipo]
+
+
 def snapshot(node):
     """Coleta o grafo inteiro. Snapshot completo, não diff (§4)."""
-    nos = [
-        {"nome": nome, "ns": ns, "completo": nome_completo(nome, ns)}
-        for nome, ns in node.get_node_names_and_namespaces()
-    ]
+    eu = node.get_fully_qualified_name()
+    nos = []
+    for nome, ns in node.get_node_names_and_namespaces():
+        completo = nome_completo(nome, ns)
+        registro = {"nome": nome, "ns": ns, "completo": completo}
+        registro.update(perfil(node, nome, ns))
+        # O próprio agente não tem tópico e cairia na mesma peneira dos nós de
+        # serviço. Ele fica marcado para a GUI nunca escondê-lo: "em qual
+        # máquina eu estou" é informação de primeira classe (§7), e o nó do
+        # agente sumindo da lista responde essa pergunta errado.
+        if completo == eu:
+            registro["agente"] = True
+        nos.append(registro)
 
     topicos = []
     for nome, tipos in node.get_topic_names_and_types():
@@ -93,7 +174,13 @@ def snapshot(node):
             # Tópico pode sumir entre a listagem e a consulta.
             log(f"endpoints de {nome} indisponíveis: {exc}")
             pubs, subs = [], []
-        topicos.append({"nome": nome, "tipos": tipos, "pubs": pubs, "subs": subs})
+        topicos.append({
+            "nome": nome,
+            "tipos": tipos,
+            "pubs": pubs,
+            "subs": subs,
+            "legivel": bool(tipos) and all(legivel(t) for t in tipos),
+        })
 
     return nos, topicos
 

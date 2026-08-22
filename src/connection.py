@@ -25,6 +25,12 @@ from PySide6 import QtCore
 
 PROTOCOL_VERSION = 1
 DEFAULT_PORT = 22
+
+# O workspace do time. Vem pré-preenchido no campo *Setup ROS* porque é o caminho
+# certo na esmagadora maioria das conexões — e um campo que já vem certo é a
+# diferença entre "funciona" e "descobrir por que o tópico está laranja". Não é
+# imposição: histórico salvo vence, e apagar a linha volta ao automático.
+SETUP_PADRAO = "/hsl-player/install/setup.bash"
 CONNECT_TIMEOUT = 15
 HELLO_TIMEOUT = 45_000  # ms; inclui achar o ambiente ROS e subir o rclpy.
 
@@ -33,43 +39,94 @@ HELLO_TIMEOUT = 45_000  # ms; inclui achar o ambiente ROS e subir o rclpy.
 # viva. É o `ping` do §4, que existia sem cliente até agora.
 KEEPALIVE = 60_000  # ms
 
-# Roda no robô antes do agente. Estratégia em camadas do §5: caminho explícito
-# vence, depois /opt/ros, depois overlays de workspace, e falhar dizendo o que
+# Roda no robô antes do agente. Estratégia em camadas do §5: fontes explícitas
+# vencem, depois /opt/ros, depois overlays de workspace, e falhar dizendo o que
 # foi procurado. Sem `set -u`: os setup.bash do ROS não sobrevivem a ele.
+#
+# As fontes explícitas são uma *lista*, uma por linha, e são carregadas na ordem
+# digitada — underlay primeiro, overlay depois, que é a ordem que o ament
+# respeita. Um caminho só não bastava: as mensagens do SDK moram num workspace
+# que não é o mesmo prefixo da distro, e as duas precisam entrar na mesma sessão.
 BOOTSTRAP = r"""
-setup_explicito='@@SETUP@@'
+setups='@@SETUPS@@'
 agent_b64='@@AGENT@@'
 
 tentados=''
-carregado=''
+carregados=''
 
 carregar() {
-    tentados="$tentados\n    $1"
-    [ -r "$1" ] || return 1
-    . "$1" >/dev/null 2>&1 || return 1
-    carregado="$1"
+    # O `~` não é expandido dentro de variável, então quem expande somos nós.
+    # Sem isto, `~/booster_ws/...` vira um caminho literal que não existe.
+    case "$1" in
+        '~') alvo="$HOME" ;;
+        '~/'*) alvo="$HOME/${1#\~/}" ;;
+        *) alvo="$1" ;;
+    esac
+
+    tentados="$tentados\n    $alvo"
+    [ -r "$alvo" ] || return 1
+    . "$alvo" >/dev/null 2>&1 || return 1
+    carregados="$carregados$alvo "
+    echo "carregado: $alvo" >&2
     return 0
 }
 
-if [ -n "$setup_explicito" ]; then
-    carregar "$setup_explicito"
-else
+# `explicitos` guarda se **alguma** fonte da lista carregou de verdade, e não se
+# a lista existe. A diferença importa desde que o campo passou a vir
+# pré-preenchido: num robô onde o caminho padrão não existe, a lista inteira
+# falha, e aí a situação é idêntica à de campo vazio — a busca automática tem
+# que valer. Sem isso, um padrão errado desligaria a descoberta para todo mundo.
+explicitos=''
+
+if [ -n "$setups" ]; then
+    # IFS de newline para caminho com espaço continuar inteiro, e `set -f` para
+    # caminho com `*` não virar glob antes de ser lido.
+    ifs_antigo=$IFS
+    IFS='
+'
+    set -f
+    for s in $setups; do
+        if carregar "$s"; then
+            explicitos=sim
+        else
+            echo "não consegui carregar: $s" >&2
+        fi
+    done
+    set +f
+    IFS=$ifs_antigo
+fi
+
+# Camada 2: a distro do sistema. Só entra se as fontes explícitas não trouxeram
+# ROS nenhum — um overlay de colcon já carrega o underlay dele junto, e sourcear
+# /opt/ros por cima inverteria a precedência do AMENT_PREFIX_PATH.
+if [ -z "$ROS_DISTRO" ]; then
     for s in /opt/ros/*/setup.bash; do
         carregar "$s" && break
     done
 fi
 
-if [ -z "$carregado" ]; then
+# Camada 3: overlays de workspace. Sem eles as mensagens do SDK aparecem com
+# tipo que não importa e não podem ser assinadas (§5) — mas isso é aviso, não
+# erro. Quando alguma fonte da lista carregou, a lista é a receita completa: não
+# carregamos overlay por cima do que ele escolheu, só dizemos o que existe, para
+# ele decidir acrescentar.
+#
+# Vem antes de desistir: em robô que só tem ROS dentro do workspace, é aqui que
+# o ambiente aparece.
+for o in "$HOME"/*_ws/install/setup.bash; do
+    [ -r "$o" ] || continue
+    case " $carregados" in *" $o "*) continue ;; esac
+    if [ -n "$explicitos" ]; then
+        echo "overlay disponível, não carregado: $o" >&2
+    else
+        carregar "$o"
+    fi
+done
+
+if [ -z "$carregados" ]; then
     printf 'nenhum ambiente ROS carregado. Procurado em:%b\n' "$tentados" >&2
     exit 3
 fi
-echo "ambiente: $carregado" >&2
-
-# Overlays do workspace. Sem eles as mensagens do SDK aparecem com tipo
-# desconhecido e não podem ser assinadas (§5) — mas isso é aviso, não erro.
-for o in "$HOME"/*_ws/install/setup.bash; do
-    [ -r "$o" ] && . "$o" >/dev/null 2>&1 && echo "overlay: $o" >&2
-done
 
 command -v python3 >/dev/null 2>&1 || {
     echo 'python3 não encontrado no robô' >&2
@@ -108,15 +165,37 @@ def parse_target(target):
     return user, host, porta
 
 
-def _remote_command(setup_path=""):
+def fontes_de_setup(setup):
+    """Texto do campo *Setup ROS* → lista de caminhos, na ordem digitada.
+
+    Uma fonte por linha. Linha vazia e linha de comentário são descartadas, para
+    que o campo aguente ser um bloco anotado ("# só o overlay do SDK") em vez de
+    exigir uma linha limpa.
+    """
+    if not setup:
+        return []
+    linhas = setup.splitlines() if isinstance(setup, str) else list(setup)
+
+    fontes = []
+    for linha in linhas:
+        linha = linha.strip()
+        if not linha or linha.startswith("#"):
+            continue
+        # O caminho entra no script dentro de aspa simples; uma aspa simples no
+        # meio fecharia a string e o resto viraria comando.
+        if "'" in linha:
+            raise ValueError(f"Caminho do setup não pode conter aspa simples: {linha}")
+        fontes.append(linha)
+    return fontes
+
+
+def _remote_command(setup=""):
     """Monta o comando único que o ssh executa no robô."""
     agent = Path(__file__).with_name("agent.py").read_bytes()
     agent_b64 = base64.b64encode(agent).decode("ascii")
 
-    if "'" in setup_path:
-        raise ValueError("Caminho do setup não pode conter aspa simples.")
-
-    script = BOOTSTRAP.replace("@@SETUP@@", setup_path).replace("@@AGENT@@", agent_b64)
+    setups = "\n".join(fontes_de_setup(setup))
+    script = BOOTSTRAP.replace("@@SETUPS@@", setups).replace("@@AGENT@@", agent_b64)
     script_b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
 
     # Novamente substituição de comando, para o stdin do bash não ser consumido
@@ -152,10 +231,10 @@ class SshSession(QtCore.QObject):
 
     # -- ciclo de vida ----------------------------------------------------
 
-    def start(self, target, password="", setup_path=""):
+    def start(self, target, password="", setup=""):
         try:
             user, host, porta = parse_target(target)
-            comando = _remote_command(setup_path)
+            comando = _remote_command(setup)
         except ValueError as exc:
             self.failed.emit(str(exc))
             return
@@ -328,7 +407,7 @@ class SshSession(QtCore.QObject):
         if codigo == 3:
             return (
                 f"Nenhum ambiente ROS encontrado em {self._host}. "
-                "Informe o caminho do setup.bash acima."
+                "Informe os setup.bash no campo Setup ROS, um por linha."
             )
         if codigo == 4:
             return f"python3 não existe em {self._host}."

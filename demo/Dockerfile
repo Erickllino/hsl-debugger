@@ -23,6 +23,22 @@ RUN mkdir -p /run/sshd && ssh-keygen -A
 RUN useradd --create-home --shell /bin/bash robo \
     && echo 'robo:robo' | chpasswd
 
+# O workspace com a mensagem custom. Buildado aqui, na imagem — é por isso que
+# não existe `setup.bash` nenhum em `demo/`: o arquivo é gerado pelo colcon
+# durante o `docker build` e só existe dentro do container, em
+# /hsl-player/install/setup.bash.
+#
+# `/hsl-player` é o mesmo caminho do workspace do time no robô de verdade, que a
+# GUI já traz pré-preenchido (`SETUP_PADRAO`, src/connection.py). Fica fora de
+# `~/*_ws`, o único lugar que o bootstrap varre sozinho (§5, camada 3), então
+# informar o caminho é a única forma de a mensagem carregar — que é justamente o
+# que se quer testar.
+COPY t1_robo_msgs /hsl-player/src/t1_robo_msgs
+RUN . /opt/ros/humble/setup.bash \
+    && cd /hsl-player \
+    && colcon build --merge-install \
+    && rm -rf /hsl-player/build /hsl-player/log
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY demo-nodes.sh /usr/local/bin/demo-nodes.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/demo-nodes.sh

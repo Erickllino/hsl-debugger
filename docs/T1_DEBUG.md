@@ -6,6 +6,8 @@ num robô, sem instalar nada permanente no robô e sem instalar ROS 2 no PC.
 - **Status:** arquitetura definida, implementação em andamento
 - **Equipe:** RoboCIn
 - **Alvo:** Booster T1 (ROS 2 Humble) e robôs equivalentes, inclusive emprestados
+- **Uso:** bancada e box. **Não pode ser usado durante uma partida** — ver
+  [`competition_debug.md`](competition_debug.md)
 
 ---
 
@@ -143,15 +145,73 @@ SSH não-interativo **não** executa o `.bashrc`. O comando cai num shell sem RO
 
 Estratégia em camadas:
 
-1. Caminho explícito salvo no perfil de conexão (sempre vence).
+1. **Lista** de caminhos explícitos salva no perfil de conexão (sempre vence).
 2. Procurar `/opt/ros/*/setup.bash` — pega a distro do sistema.
 3. Procurar overlays de workspace em locais prováveis (`~/*_ws/install/setup.bash`).
 4. Falhar com mensagem acionável — mostrar o que foi procurado e permitir que o
-   usuário digite o caminho, salvando no perfil.
+   usuário digite os caminhos, salvando no perfil.
 
-Overlay importa: sem ele, tópicos do SDK aparecem com tipo desconhecido e não
-podem ser assinados. A GUI deve mostrar isso como aviso explícito, não como
-tópico silenciosamente inútil.
+**A camada 1 é uma lista, não um caminho.** A distro do sistema e o workspace
+com as mensagens do SDK são dois `setup.bash` diferentes, e uma fonte só
+obrigaria a escolher entre ter ROS e ter as mensagens. As fontes são carregadas
+**na ordem da lista** — underlay primeiro, overlay depois, que é a ordem que o
+`AMENT_PREFIX_PATH` respeita. Linha vazia e linha começando com `#` são
+ignoradas, então a lista aguenta ser um bloco anotado. `~/` é expandido pelo
+bootstrap, porque dentro de variável o shell não expande.
+
+**Mas a lista não é montada no login.** O formulário tem um campo *Setup ROS* de
+uma linha, e mais nada: na hora de logar ninguém sabe ainda que vai faltar uma
+segunda fonte. Isso se descobre depois, olhando a lista de tópicos e vendo um
+com tipo não carregado. Então acrescentar fonte é ação do rodapé — o botão
+**+ setup ROS**, que só existe conectado, e cujo diálogo já vem com os
+`overlay disponível, não carregado` que o bootstrap relatou.
+
+Acrescentar fonte **reabre a sessão**. Não é limitação da interface: o bootstrap
+carrega o ambiente antes do `python3` existir, e `AMENT_PREFIX_PATH`/`PYTHONPATH`
+são lidos no import — não há como sourcear um `setup.bash` dentro de um agente
+que já está rodando. Derrubar e subir de novo é barato porque o agente é efêmero
+por construção (§3); o que se perde são os tópicos abertos, não estado no robô.
+A senha continua em memória durante a reabertura, o que o §6 permite
+explicitamente — sem isso, cada fonte acrescentada custaria digitar a senha de novo.
+
+O histórico guarda a lista inteira, inclusive o que foi acrescentado no meio da
+sessão. Ao recarregar um perfil, a primeira fonte volta para o campo e as demais
+voltam como extras — o campo encolheu, a memória não.
+
+**O campo já vem preenchido** com `/hsl-player/install/setup.bash` — o workspace
+do time, e o caminho certo na esmagadora maioria das conexões (`SETUP_PADRAO`,
+`src/connection.py`). Um campo que já vem certo é a diferença entre "funciona" e
+"descobrir por que o tópico está laranja". Não é imposição: perfil salvo vence o
+padrão — inclusive quando o que funcionou naquele robô foi o campo **vazio**, já
+que sobrescrever isso desfaria a descoberta da última vez — e apagar a linha
+volta ao automático.
+
+Três regras de precedência, todas consequência de "a lista é a receita":
+
+- a camada 2 (`/opt/ros/*`) só entra se, depois da lista, `ROS_DISTRO` continuar
+  vazio. Um `install/setup.bash` de colcon já carrega o underlay dele junto;
+  sourcear `/opt/ros` por cima inverteria a precedência;
+- a camada 3 (`~/*_ws`) **não** é carregada quando a lista existe — seria
+  overlay entrando por cima do que o usuário escolheu. Os candidatos encontrados
+  vão para o diagnóstico como `overlay disponível, não carregado`, para ele
+  decidir acrescentar;
+- mas "a lista existe" quer dizer **alguma fonte da lista carregou**, não que o
+  campo tinha texto. A distinção só passou a importar quando o campo ganhou um
+  padrão: num robô que não tem `/hsl-player`, a lista inteira falha, e aí a
+  situação é idêntica à de campo vazio — a busca automática tem que valer. Sem
+  isso, um padrão errado desligaria a descoberta para todo mundo.
+
+Overlay importa: sem ele, tópicos do SDK aparecem com tipo que não importa e não
+podem ser assinados. A GUI mostra isso como aviso explícito, não como tópico
+silenciosamente inútil, e em dois lugares:
+
+- **na lista de tópicos**, a coluna *Tipo* vem pintada quando o tipo está no
+  grafo mas o pacote da mensagem não existe no ambiente carregado. O agente
+  testa o `import` de cada tipo uma vez, no snapshot (`legivel`), justamente
+  para a resposta aparecer na lista inteira de uma vez em vez de tópico por
+  tópico, ao clicar;
+- **na contagem do topo**, como `N sem tipo carregado`. É a resposta imediata à
+  pergunta "meu setup pegou as mensagens do SDK?".
 
 **Envio do script.** Não é possível mandar o `.py` pelo `stdin` se o `stdin` é o
 canal do protocolo. Duas opções, ambas de poucas linhas: copiar o arquivo numa
@@ -279,6 +339,43 @@ Desenhar no PC, a partir do JSON que já chega, não depende de nada disso.
   faixa real vai de 0,1 a 500 Hz), e o Hz conta todas as mensagens, não as que
   sobraram da decimação. Fio parado quer dizer "não estou medindo isto", nunca
   "não passa nada aqui".
+
+### Serviço não é nó, mas aparece na lista de nós
+
+O grafo do ROS 2 não distingue "nó que move o robô" de "nó que só existe para
+servir ou chamar um serviço" — `get_node_names_and_namespaces()` devolve os dois
+misturados. O segundo tipo costuma ser efêmero: um cliente nasce para uma
+chamada e morre depois, e num snapshot a 1 Hz ele entra e sai da lista. O
+resultado é uma tabela que pisca, e o que pisca atrapalha ler o que não pisca.
+
+Quem classifica é o agente, não a GUI: `perfil()` pergunta ao grafo do robô
+quantos tópicos, serviços e clientes **próprios** cada nó tem. "Próprio" desconta
+o que todo nó ROS 2 ganha de graça — `/rosout`, `/parameter_events` e os seis
+serviços de parâmetro; sem esse desconto todo nó pareceria ter tópico e serviço,
+e a classificação não separaria nada. Nó com zero tópico próprio é nó de
+serviço.
+
+A caixa **ocultar serviços** vem marcada, e isso é uma exceção deliberada à
+regra do desenho logo acima. A diferença é que `/rosout` fica parado na tela e
+só polui; nó de serviço efêmero **muda a tela a cada segundo**, e o custo dele
+não é ocupar espaço, é atrapalhar a leitura do que você veio ver. A exceção só
+se sustenta porque nada some calado: a contagem do topo sempre diz `N serviços
+ocultos`, o tooltip lista os nomes um por um, e desmarcar a caixa traz todos de
+volta na hora.
+
+Dois detalhes que não são opcionais:
+
+- o nó do **próprio agente** também não tem tópico e cairia na mesma peneira.
+  Ele vem marcado no snapshot e nunca é escondido — "em qual máquina eu estou" é
+  informação de primeira classe (§7), e o agente sumindo da lista responde essa
+  pergunta errado;
+- esconder o nó não basta: ele publica em `/rosout` como qualquer um, e deixar o
+  nome dele nos `pubs` faria a contagem de `/rosout` oscilar do mesmo jeito. Com
+  o filtro ligado, os nós escondidos saem também dos `pubs`/`subs` dos tópicos —
+  é isso que faz a tabela parar de ser reconstruída a cada aparição.
+
+Nó que o agente **não conseguiu** classificar (sumiu entre a listagem e a
+consulta) vem sem o campo e fica visível. Na dúvida, mostrar.
 
 Registro das três respostas possíveis, que não eram equivalentes:
 
